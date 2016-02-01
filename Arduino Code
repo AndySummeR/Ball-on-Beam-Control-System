@@ -1,0 +1,215 @@
+
+#include <FlexiTimer2.h>
+
+//============= Setup Variable for the IR Sensor =============
+int IRpinLT = A10;
+int IRpinRT = A14;
+float distanceLT = 0.00;
+float distanceRT = 0.00;
+float dis = 0.00;
+
+//============ Setup Variable for motor =====================
+int motorDirF = 10;
+int motorDirB = 11;
+int motorPWM = 9;
+
+//============ Control Gains ================================
+const float G1 = 99.5018;
+const float G2 = 77.3276;
+const float G3 = 39.8344;
+const float G4 = 1.3335;
+//observer gain
+const float K1 = 43.8;
+const float K2 = 7.2;
+const float K3 = 50.2;
+const float K4 = 5803.8;
+
+//============ Static Variables ============================
+static float t = 0.0; // Time in sec
+static long  Ts = 10; // Ts in millise (change as appropriate)
+static float dt = Ts / 100; //sample time in sec/10
+static float past_x1 = 0.0;
+static float past_x2 = 0.0;
+static float x3 = 0.0;     //x1 = x, x2 = theta, x3 = xdot, x4 = thetadot
+static float x4 = 0.0;
+//estimated state variables
+static float x1hat = 0.0;
+static float x2hat = 0.0;
+static float x3hat = 0.0;
+static float x4hat = 0.0;
+static float dx1hat = 0.0;
+static float dx2hat = 0.0;
+static float dx3hat = 0.0;
+static float dx4hat = 0.0;
+//residual
+static float r1 = 0.0;
+static float r2 = 0.0;
+
+//============ Ordinary Variables ==========================
+unsigned long time;
+const float pi = 3.141592;
+int dutycycle;
+int PWM_val;
+float count;
+volatile float u;
+volatile float v;
+volatile float x1;
+volatile float x2;
+
+
+//============= Read Counter ===============================
+/* Variable Decleration*/
+//Counters Output Pins
+int counterInputs[8] = {53, 51, 49, 47, 45, 43, 41, 39}; // this is the standard but it can be connected differently depending on the rover.
+//Counter select Pins
+int counterSEL = 36;
+//Counter enable pins
+int counterOE = 34;
+//Counter reset Pins
+int counterRST = 32;
+
+float counterRead(int inputs[8], int _OE, int _SEL) {
+  float value = 0;
+  //Enable the counter
+  digitalWrite(_OE, LOW);
+  //Select High Byte
+  digitalWrite(_SEL, LOW);
+  //Read High Byte from Counter
+  for (int i = 8 ; i <= 15; i++ ) {
+    value = value - digitalRead(inputs[16 - i]) * pow(2, 16 - i);
+  }
+  //Select Low Byte
+  digitalWrite(_SEL, HIGH);
+  //Read Low Byte
+  for (int i = 0; i < 8; i++) {
+    value = value + digitalRead(inputs[i]) * pow(2, i);
+  }
+  digitalWrite(_OE, HIGH);
+  return value;
+}
+//get counts
+//count = counterRead(counterInputs, counterOE, counterSEL);
+
+//=============== Read IR Sensors =========================
+//This method return a distance value in cm. negative value represents ball is on the left hand side, positive value represents ball is on the right hand side
+float Sensors_read() {
+  float position;
+  float voltsLT = analogRead(IRpinLT) * 0.0048828125;
+  distanceLT = 32.75 * pow(voltsLT, -1.10);
+  float voltsRT = analogRead(IRpinRT) * 0.0048828125;
+  distanceRT = 32.75 * pow(voltsRT, -1.10);
+  position = distanceLT - distanceRT;
+  return position;
+}
+//get distance
+//dis = Sensors_read();
+//=============== Saturation function ======================
+float sat(float v) {
+  float u;
+  if (abs(v) <= 12) {
+    u = v;
+  }
+  else if (abs(v) > 12) {
+    u = 12;
+  }
+  else {
+    u = -12;
+  }
+}
+
+//============ Ball and Beam Control Algorithm =============
+void BallAndBeamControl() {
+  //Read ball position from sensors in meter.
+  x1 = Sensors_read() / 100;
+  //Read counts from HCTL2016
+  count = counterRead(counterInputs, counterOE, counterSEL);
+  //Calculate the rotation angle of the motor
+  x2 = count * 2 * pi / 8000;
+
+  //Compute control signal
+  v = -G1 * x1 - G2 * x2 - G3 * x3 - G4 * x4;
+  //saturation function
+  u = sat(v);
+
+  //output control signal to PWM
+  PWM_val = map(u, -12, 12, -255, 255); //==> I think the problem might be here.
+  dutycycle = abs(PWM_val);
+
+  if (PWM_val > 0) {
+    digitalWrite(motorDirF, HIGH);
+    digitalWrite(motorDirB, LOW);
+    analogWrite(motorPWM, dutycycle);
+  }
+  else if (PWM_val < 0) {
+    digitalWrite(motorDirF, LOW);
+    digitalWrite(motorDirB, HIGH);
+    analogWrite(motorPWM, dutycycle);
+  }
+  else {
+    analogWrite(motorPWM, 0);
+  }
+
+  //=========== UPDATE ALL STATE VARIABLE ==============
+  //update time
+  t += dt;
+  //updat estimated state variables
+  r1 = x1 - past_x1;
+  r2 = x2 - past_x2;
+  dx1hat = (x3hat + K1 * r1) * dt;
+  dx2hat = (x4hat + K2 * r1) * dt;
+  dx3hat = (x2hat * 9.8084 + K3 * r2) * dt;
+  dx4hat = (-x1hat * 8.9182 - x4hat * 113.0289 + u * 17.8545 + K4 * r2) * dt;
+  x1hat += dx1hat;
+  x2hat += dx2hat;
+  x3hat += dx3hat;
+  x4hat += dx4hat;
+  //update state variables
+  x1 = x1hat;
+  x2 = x2hat;
+  x3 = x3hat;
+  x4 = x4hat;
+
+  past_x1 = x1;
+  past_x2 = x2;
+}
+
+
+void setup() {
+  //============= Initializing Counter's pins ================
+  pinMode(counterSEL, OUTPUT);
+  pinMode(counterOE, OUTPUT);
+  pinMode(counterRST, OUTPUT);
+  for (int i = 0; i < 8; i++) {
+    pinMode(counterInputs[i], INPUT);
+  }
+  //Reset the counter.
+  digitalWrite(counterRST, LOW);
+  digitalWrite(counterRST, HIGH);
+  //Setup IR sensor pins
+  pinMode(IRpinLT, INPUT);
+  pinMode(IRpinRT, INPUT);
+  //Setup Motor pins
+  pinMode(motorDirF, OUTPUT);
+  pinMode(motorDirB, OUTPUT);
+  pinMode(motorPWM, OUTPUT);
+
+  //============ This is the interrupt service routine =========
+  FlexiTimer2::set(Ts, BallAndBeamControl);
+  FlexiTimer2::start();
+  Serial.begin(9600);
+}
+
+void loop() {
+
+  time = millis() / 10;
+  // print data
+  Serial.print("Time:");
+  Serial.print(time);
+  Serial.print('\t');
+  Serial.print("Ball Position: ");
+  Serial.print("");
+  Serial.print("\t");
+  Serial.print("Beam Angle: ");
+  Serial.println("");
+  delay(10);
+}
